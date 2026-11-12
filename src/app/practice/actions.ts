@@ -9,6 +9,7 @@ import { withProgress } from "@/lib/progress";
 import { MAX_ATTEMPTS, QUESTIONS_PER_QUIZ } from "@/lib/quiz-meta";
 import { findQuestion, QUIZZES, type Quiz } from "@/lib/quizzes";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { loadLearner, needsGroup } from "@/lib/supabase/learner";
 import { loadProgress } from "@/lib/supabase/progress";
 import { createClient } from "@/lib/supabase/server";
 import { MODULES } from "@/lib/topics";
@@ -56,8 +57,10 @@ async function isGuest() {
 
 /**
  * Starts (or resumes) a quiz.
- * Members: resumes an unfinished attempt, or starts the next one (up to MAX_ATTEMPTS), with
- * the questions for their group and seat. Guests: a random set that is never saved.
+ * Signed in: resumes an unfinished attempt, or starts the next one (up to MAX_ATTEMPTS).
+ * Members get the questions for their group and seat; registered guests (no ITCamp group)
+ * get a random set, saved like a member's. Guest mode (not signed in): a random set that
+ * is never saved.
  */
 export async function startQuiz(slug: string): Promise<StartResult> {
   const quiz = QUIZZES[slug];
@@ -83,20 +86,23 @@ export async function startQuiz(slug: string): Promise<StartResult> {
       .from("quiz_attempts")
       .select("id, attempt_no, question_ids, finished_at")
       .eq("user_id", user.id)
-      .eq("quiz_slug", slug)
+      .eq("topic_slug", slug)
       .order("attempt_no");
 
-  // One round trip: progress (for the lock), group and attempts are fetched together.
-  const [progress, { data: profile }, firstLoad] = await Promise.all([
+  // One round trip: progress (for the lock), the learner (group) and attempts are fetched together.
+  const [progress, learner, firstLoad] = await Promise.all([
     loadProgress(supabase, user.id),
-    supabase.from("profiles").select("group_number, group_seat").eq("id", user.id).maybeSingle(),
+    loadLearner(supabase),
     loadAttempts(),
   ]);
   const topic = withProgress(MODULES, progress)
     .flatMap((m) => m.topics)
     .find((t) => t.slug === slug);
   if (topic?.lockedReason) return { ok: false, error: topic.lockedReason };
-  if (!profile?.group_number || !profile.group_seat) return { ok: false, error: "Choose your ITCamp group first." };
+  if (!learner) return { ok: false, error: "We could not load your account. Please refresh the page." };
+  if (needsGroup(learner) || (learner.group_number && !learner.group_seat)) {
+    return { ok: false, error: "Choose your ITCamp group first." };
+  }
 
   let { data: attempts, error } = firstLoad;
   if (error || !attempts) {
@@ -109,15 +115,19 @@ export async function startQuiz(slug: string): Promise<StartResult> {
   if (!current) {
     if (attempts.length >= MAX_ATTEMPTS) return { ok: false, error: "You have used both attempts for this quiz." };
     const attemptNo = attempts.length + 1;
-    const ids = drawForMember(quiz.questions, QUESTIONS_PER_QUIZ, {
-      slug,
-      group: profile.group_number,
-      seat: profile.group_seat,
-      attempt: attemptNo,
-    });
+    // Teammates get different questions by group and seat; a registered guest has no group.
+    const ids =
+      learner.group_number && learner.group_seat
+        ? drawForMember(quiz.questions, QUESTIONS_PER_QUIZ, {
+            slug,
+            group: learner.group_number,
+            seat: learner.group_seat,
+            attempt: attemptNo,
+          })
+        : drawForGuest(quiz.questions, QUESTIONS_PER_QUIZ);
     const insert = await admin
       .from("quiz_attempts")
-      .insert({ user_id: user.id, quiz_slug: slug, attempt_no: attemptNo, question_ids: ids, total: ids.length })
+      .insert({ user_id: user.id, topic_slug: slug, attempt_no: attemptNo, question_ids: ids, total: ids.length })
       .select("id, attempt_no, question_ids, finished_at")
       .single();
     if (insert.error) {
@@ -178,7 +188,8 @@ export async function answerQuestion(
   const admin = createAdminClient();
   if (!admin) return { ok: false, error: NOT_CONFIGURED };
 
-  // One database call: it checks the attempt is yours, saves the answer and returns the score.
+  // One database call (the club database's learning_hub.submit_answer, service role only): it
+  // checks the attempt is yours, saves the answer and returns the score.
   const { data, error } = await admin.rpc("submit_answer", {
     p_user: user.id,
     p_attempt: attemptId,
@@ -188,8 +199,6 @@ export async function answerQuestion(
     p_correct: feedback.correct,
   });
   if (error) {
-    // The function isn't installed yet (migration 20261111140000 not run): use the slower steps.
-    if (error.code === "PGRST202") return answerSlowly(admin, user.id, slug, attemptId, position, questionId, feedback);
     if (error.code === "42501") return { ok: false, error: "That attempt is not yours." };
     if (error.code !== "23505") console.error("answerQuestion: saving the answer failed", error);
     return { ok: false, error: answerError(error) };
@@ -205,37 +214,7 @@ function answerError(error: { code?: string; message?: string }) {
   return "We could not save your answer. Please try again.";
 }
 
-/** The original three-step version, kept only as a fallback until the submit_answer function exists. */
-async function answerSlowly(
-  admin: NonNullable<ReturnType<typeof createAdminClient>>,
-  userId: string,
-  slug: string,
-  attemptId: number,
-  position: number,
-  questionId: string,
-  feedback: Feedback,
-): Promise<AnswerResult> {
-  const { data: attempt } = await admin
-    .from("quiz_attempts")
-    .select("user_id, quiz_slug, question_ids, finished_at")
-    .eq("id", attemptId)
-    .maybeSingle();
-  if (!attempt || attempt.user_id !== userId || attempt.quiz_slug !== slug) return { ok: false, error: "That attempt is not yours." };
-  if (attempt.finished_at) return { ok: false, error: "This attempt is already finished." };
-  if (attempt.question_ids[position - 1] !== questionId) return { ok: false, error: "That question is not in this attempt." };
-
-  const { error } = await admin
-    .from("quiz_answers")
-    .insert({ attempt_id: attemptId, position, question_id: questionId, chosen: feedback.chosen, is_correct: feedback.correct });
-  if (error) {
-    if (error.code !== "23505") console.error("answerQuestion: saving the answer failed", error);
-    return { ok: false, error: answerError(error) };
-  }
-  const { data: after } = await admin.from("quiz_attempts").select("score, finished_at").eq("id", attemptId).single();
-  return { ok: true, ...feedback, finished: !!after?.finished_at, score: after?.score ?? null };
-}
-
-/** For members who registered before groups existed. The group can only be set once. */
+/** For members the club has no ITCamp group for. The group can only be set once. */
 export async function setMyGroup(group: number): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!isGroupNumber(group)) return { ok: false, error: "Choose a valid group number." };
   const supabase = await createClient();

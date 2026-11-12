@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { checkPasswordChange, continueAsGuest } from "@/app/login/actions";
-import { GROUP_NUMBERS, isGroupNumber } from "@/lib/groups";
 import { createClient } from "@/lib/supabase/client";
 
 type Props = {
@@ -24,8 +23,11 @@ function friendlyError(message: string) {
   if (message.includes("Email not confirmed")) {
     return "Please confirm your email first. Check your inbox for the link.";
   }
+  if (message.includes("Signups not allowed")) {
+    return "New accounts can't be created right now. ITCamp subcomms: log in with your club account.";
+  }
   if (message.includes("Database error saving new user")) {
-    return NAME_TAKEN;
+    return "We could not create your account. Please try again.";
   }
   if (message.toLowerCase().includes("rate limit")) {
     return "Too many emails were sent recently. Please try again in a while.";
@@ -46,18 +48,14 @@ export function AuthForm({ mode, initialError, next = "/", allowGuest = false }:
     const email = String(form.get("email")).trim();
     const password = String(form.get("password"));
     const displayName = String(form.get("displayName") ?? "").trim();
-    const groupNumber = Number(form.get("group"));
 
     setError("");
     setBusy(true);
     const supabase = createClient();
 
+    // Registering makes a guest account: the hub's notes and challenges, nothing on the club
+    // site. ITCamp subcomms already have a club login and log in with it instead.
     if (isRegister) {
-      if (!isGroupNumber(groupNumber)) {
-        setError("Choose your ITCamp group.");
-        setBusy(false);
-        return;
-      }
       // Display names are unique (ignoring case), so check before creating the account.
       const { data: taken, error: lookupError } = await supabase.rpc("display_name_taken", { name: displayName });
       if (lookupError) {
@@ -74,7 +72,8 @@ export function AuthForm({ mode, initialError, next = "/", allowGuest = false }:
         email,
         password,
         options: {
-          data: { display_name: displayName, group_number: groupNumber },
+          // The club database names the learner after this on their first visit.
+          data: { display_name: displayName },
           emailRedirectTo: `${window.location.origin}/auth/callback`,
         },
       });
@@ -82,7 +81,7 @@ export function AuthForm({ mode, initialError, next = "/", allowGuest = false }:
       if (signUpError) setError(friendlyError(signUpError.message));
       // Supabase reports success with no identities when the email is already confirmed.
       else if (signUpData.user?.identities?.length === 0) {
-        setError("This email is already registered. Log in instead.");
+        setError("This email already has an account (ITCamp subcomms have their club login). Log in instead.");
       } else setSentTo(email);
       return;
     }
@@ -116,6 +115,16 @@ export function AuthForm({ mode, initialError, next = "/", allowGuest = false }:
     <form onSubmit={onSubmit} className="flex flex-col gap-5">
       <h1 className="text-4xl font-semibold">{isRegister ? "Create your account" : "Log in"}</h1>
       {isRegister && (
+        <p className="-mt-2 text-dim">
+          A free account to read the notes and save your challenge scores. ITCamp subcomms: you already have one, so{" "}
+          <Link href="/login" className="text-ink underline underline-offset-4">
+            log in with your club account
+          </Link>{" "}
+          instead.
+        </p>
+      )}
+      {!isRegister && <p className="-mt-2 text-dim">ITCamp subcomms: use your SIM IT Club email and password.</p>}
+      {isRegister && (
         <label htmlFor="displayName" className="flex flex-col gap-2">
           Display name
           <input
@@ -129,25 +138,7 @@ export function AuthForm({ mode, initialError, next = "/", allowGuest = false }:
             className={FIELD}
           />
           <span id="displayNameHint" className="text-sm text-dim">
-            Shown in the header, on your account and on the leaderboard.
-          </span>
-        </label>
-      )}
-      {isRegister && (
-        <label htmlFor="group" className="flex flex-col gap-2">
-          ITCamp group
-          <select id="group" name="group" required defaultValue="" aria-describedby="groupHint" className={FIELD}>
-            <option value="" disabled>
-              Choose your group
-            </option>
-            {GROUP_NUMBERS.map((n) => (
-              <option key={n} value={n}>
-                Group {n}
-              </option>
-            ))}
-          </select>
-          <span id="groupHint" className="text-sm text-dim">
-            Teammates get different questions. You can&apos;t change this later, so check with your mentor.
+            Shown in the header and on your account.
           </span>
         </label>
       )}

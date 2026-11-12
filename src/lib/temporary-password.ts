@@ -4,7 +4,6 @@
  * /account/password until they choose their own, as on the club site. Server code only.
  */
 import { timingSafeEqual } from "node:crypto";
-import type { User } from "@supabase/supabase-js";
 
 /** Cookie set at login with the temporary password; cleared once it's changed. */
 export const PASSWORD_CHANGE_COOKIE = "itc_change_password";
@@ -14,11 +13,6 @@ export const PASSWORD_CHANGE_PATH = "/account/password";
 
 /** How long the cookie lasts: one day, longer than any single visit. */
 export const PASSWORD_CHANGE_COOKIE_SECONDS = 60 * 60 * 24;
-
-/** Only the service role can set app_metadata, so a sign-up can't claim to be a subcomm. */
-export function isSubcomm(user: User) {
-  return user.app_metadata?.role === "subcomm";
-}
 
 /**
  * Whether a password is the shared temporary one. Compares in constant time, and is

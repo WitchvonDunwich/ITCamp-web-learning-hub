@@ -11,6 +11,7 @@ import { GUEST_COOKIE } from "@/lib/guest";
 import { bestScores, withProgress } from "@/lib/progress";
 import { MAX_ATTEMPTS } from "@/lib/quiz-meta";
 import { findQuestion, QUIZZES } from "@/lib/quizzes";
+import { loadLearner, needsGroup } from "@/lib/supabase/learner";
 import { createClient } from "@/lib/supabase/server";
 import { MODULES } from "@/lib/topics";
 
@@ -75,19 +76,19 @@ export default async function QuizPage(props: PageProps<"/practice/[slug]">) {
     );
   }
 
-  // One round trip: the profile and the attempts (with their answers) are fetched together,
-  // and the lock for this quiz is worked out from the same attempts.
-  const [{ data: profile }, { data: attemptData }, { data: allAttempts }] = await Promise.all([
-    supabase.from("profiles").select("is_admin, group_number, group_seat").eq("id", user.id).maybeSingle(),
+  // One round trip: the learner (made on their first visit) and the attempts (with their
+  // answers) are fetched together, and the lock for this quiz is worked out from the same attempts.
+  const [learner, { data: attemptData }, { data: allAttempts }] = await Promise.all([
+    loadLearner(supabase),
     supabase
       .from("quiz_attempts")
       .select("id, attempt_no, score, total, started_at, finished_at, quiz_answers(position, question_id, chosen, is_correct, answered_at)")
       .eq("user_id", user.id)
-      .eq("quiz_slug", slug)
+      .eq("topic_slug", slug)
       .order("attempt_no"),
-    supabase.from("quiz_attempts").select("quiz_slug, score, total").eq("user_id", user.id).not("finished_at", "is", null),
+    supabase.from("quiz_attempts").select("quiz_slug:topic_slug, score, total").eq("user_id", user.id).not("finished_at", "is", null),
   ]);
-  const progress = { isAdmin: !!profile?.is_admin, best: bestScores(allAttempts ?? []) };
+  const progress = { isAdmin: !!learner?.is_admin, best: bestScores(allAttempts ?? []) };
   const lockedReason = withProgress(MODULES, progress)
     .flatMap((m) => m.topics)
     .find((t) => t.slug === slug)?.lockedReason;
@@ -113,7 +114,7 @@ export default async function QuizPage(props: PageProps<"/practice/[slug]">) {
 
   return (
     <Shell>
-      {!profile?.group_number ? (
+      {needsGroup(learner) ? (
         <>
           <section className="border border-violet bg-bg p-6 sm:p-8">
             <h1 className="text-4xl font-semibold">{quiz.title} challenge</h1>

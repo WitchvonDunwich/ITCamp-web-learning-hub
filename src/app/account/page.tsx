@@ -7,6 +7,7 @@ import { GroupPicker } from "@/components/account/GroupPicker";
 import { AccountForm } from "@/components/auth/AccountForm";
 import { bestScores } from "@/lib/progress";
 import { MAX_ATTEMPTS, QUESTIONS_PER_QUIZ, QUIZ_TITLES } from "@/lib/quiz-meta";
+import { loadLearner, needsGroup } from "@/lib/supabase/learner";
 import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = { title: "Account · ITCamp Learning Hub" };
@@ -22,15 +23,14 @@ export default async function AccountPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
+  // The learner row is made on their first visit, so load it before reading when they joined.
+  const learner = await loadLearner(supabase);
   const [{ data: profile }, { data: attempts }] = await Promise.all([
-    supabase
-      .from("profiles")
-      .select("display_name, created_at, is_admin, group_number, group_seat")
-      .eq("id", user.id)
-      .maybeSingle(),
-    supabase.from("quiz_attempts").select("quiz_slug, score, total, finished_at").eq("user_id", user.id),
+    supabase.from("learners").select("created_at").eq("user_id", user.id).maybeSingle(),
+    supabase.from("quiz_attempts").select("quiz_slug:topic_slug, score, total, finished_at").eq("user_id", user.id),
   ]);
-  const isAdmin = !!profile?.is_admin;
+  const isAdmin = !!learner?.is_admin;
+  const isGuestAccount = learner?.account_type === "guest";
   const finished = (attempts ?? []).filter((a) => a.finished_at);
   const best = bestScores(finished);
   const points = Object.values(best).reduce<number>((sum, n) => sum + (n ?? 0), 0);
@@ -64,7 +64,13 @@ export default async function AccountPage() {
         </div>
         <div>
           <dt className="text-sm text-dim">ITCamp group</dt>
-          <dd>{profile?.group_number ? `Group ${profile.group_number} (member ${profile.group_seat})` : "Not set yet"}</dd>
+          <dd>
+            {learner?.group_number
+              ? `Group ${learner.group_number} (member ${learner.group_seat})`
+              : isGuestAccount
+                ? "Guest account (no ITCamp group)"
+                : "Not set yet"}
+          </dd>
         </div>
         <div>
           <dt className="text-sm text-dim">Joined</dt>
@@ -79,7 +85,7 @@ export default async function AccountPage() {
           </dd>
         </div>
       </dl>
-      {!profile?.group_number && <GroupPicker />}
+      {needsGroup(learner) && <GroupPicker />}
 
       <section aria-labelledby="points-heading" className="flex flex-col gap-3 border border-violet bg-bg/85 p-5">
         <div className="flex items-baseline justify-between gap-3">
@@ -108,7 +114,12 @@ export default async function AccountPage() {
         </ul>
       </section>
 
-      <AccountForm userId={user.id} initialName={profile?.display_name ?? ""} onLeaderboard={!isAdmin} />
+      <AccountForm
+        userId={user.id}
+        initialName={learner?.display_name ?? ""}
+        // Guests and admins are kept off the leaderboard.
+        onLeaderboard={!isAdmin && !isGuestAccount}
+      />
     </main>
   );
 }

@@ -28,7 +28,7 @@ export function AccountForm({ userId, initialName, onLeaderboard }: Props) {
     setMessage("");
 
     const supabase = createClient();
-    const { error } = await supabase.from("profiles").update({ display_name: displayName }).eq("id", userId);
+    const { error } = await supabase.from("learners").update({ display_name: displayName }).eq("user_id", userId);
     if (error) {
       show(
         error.code === "23505"

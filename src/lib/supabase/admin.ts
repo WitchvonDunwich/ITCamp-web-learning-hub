@@ -2,8 +2,10 @@
  * SERVER ONLY. A Supabase client with the service role (secret) key, which skips RLS.
  * Used only to write quiz attempts and answers after the server has graded them, so
  * members can't write their own scores. Never import this from a "use client" file.
+ * On the club's project this key can change anything there, so keep it server-side only.
  */
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import { HUB_SCHEMA } from "@/lib/supabase/schema";
 
 export function createAdminClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -16,6 +18,8 @@ export function createAdminClient() {
     return null;
   }
   return createSupabaseClient(url, key, {
+    // Tables and functions live in the club database's learning_hub schema.
+    db: { schema: HUB_SCHEMA },
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
   });
 }

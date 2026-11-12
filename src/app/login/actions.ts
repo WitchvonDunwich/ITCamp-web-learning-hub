@@ -4,9 +4,9 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { GUEST_COOKIE, GUEST_COOKIE_SECONDS } from "@/lib/guest";
 import { safeNext } from "@/lib/safe-next";
+import { loadLearner } from "@/lib/supabase/learner";
 import { createClient } from "@/lib/supabase/server";
 import {
-  isSubcomm,
   isTemporaryPassword,
   PASSWORD_CHANGE_COOKIE,
   PASSWORD_CHANGE_COOKIE_SECONDS,
@@ -14,9 +14,11 @@ import {
 } from "@/lib/temporary-password";
 
 /**
- * Runs right after a successful login. A subcomm who used the shared temporary password
- * must choose their own first, so this returns the change-password page for them, and
- * null for everyone else. Logging in also ends guest mode.
+ * Runs right after a successful login. Makes sure they have a learner row (made on the first
+ * visit, with a member's ITCamp group from the club's records) and keeps the name the header
+ * shows in step with it. Anyone who used the shared temporary password must choose their own
+ * first, so this returns the change-password page for them, and null for everyone else.
+ * Logging in also ends guest mode.
  */
 export async function checkPasswordChange(password: string): Promise<string | null> {
   const supabase = await createClient();
@@ -26,7 +28,15 @@ export async function checkPasswordChange(password: string): Promise<string | nu
   const cookieStore = await cookies();
   cookieStore.delete(GUEST_COOKIE);
 
-  if (user && isSubcomm(user) && isTemporaryPassword(password)) {
+  // The header reads the name from the session (src/lib/use-session.ts).
+  const learner = user ? await loadLearner(supabase) : null;
+  if (user && learner && user.user_metadata?.display_name !== learner.display_name) {
+    await supabase.auth.updateUser({ data: { display_name: learner.display_name } });
+  }
+
+  // Only club logins are ever given the temporary password, and most club logins don't carry
+  // a role in their metadata, so the password itself is the check.
+  if (user && isTemporaryPassword(password)) {
     cookieStore.set(PASSWORD_CHANGE_COOKIE, "1", {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
